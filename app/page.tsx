@@ -21,38 +21,52 @@ import {
 } from 'lucide-react';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-interface PharmacistRecord {
-  BRANCH: string;
-  USER_ID: string;
-  USER_NAME: string;
-  NET_SALES: number;
-  CC: number;
-  BASKET_VOLUME: number;
-  BASKET_SIZE: number;
-  PL_MIX: number;
-  PROMOTED_MIXED_SALES: number;
-  NE_MIX: number;
-  PRIVATE_LABEL: number;
-  ONLINE: number;
+interface DynamicRecord {
+  _BRANCH_KEY: string;
+  _USER_NAME_KEY: string;
+  _MAIN_VALUE_KEY: string;
+  [key: string]: any; // نقل وحفظ كافة القيم كما هي من الإكسيل لتكون متغيرة بالكامل حسب الملف المرفوع
 }
 
-type SortKey = 'NET_SALES' | 'BASKET_SIZE' | 'PL_MIX' | 'PRIVATE_LABEL';
+type SortKey = string; 
 type SortDir = 'asc' | 'desc';
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 const parseNum = (val: unknown): number => {
   if (val === null || val === undefined || val === '') return 0;
-  const n = Number(String(val).replace(/,/g, ''));
-  return isNaN(n) ? 0 : n;
+  const cleanStr = String(val).replace(/,/g, '').trim();
+  const n = Number(cleanStr);
+  if (!isNaN(n)) return n;
+  
+  // نظام حماية متطور لتحليل الأرقام المنسقة والنسب المئوية التراكمية
+  const fallbackNum = parseFloat(cleanStr.replace(/[^0-9.-]/g, ''));
+  if (cleanStr.includes('%')) return isNaN(fallbackNum) ? 0 : fallbackNum / 100;
+  return isNaN(fallbackNum) ? 0 : fallbackNum;
 };
 
-const formatCurrency = (value: number): string => {
-  if (!value && value !== 0) return '٠ ر.س';
-  if (Math.abs(value) >= 1_000_000)
-    return `${(value / 1_000_000).toFixed(2)} م ر.س`;
-  if (Math.abs(value) >= 1_000)
-    return `${(value / 1_000).toFixed(1)} ك ر.س`;
-  return `${Math.round(value)} ر.س`;
+const formatDynamicValue = (value: unknown, keyName: string): string => {
+  if (value === null || value === undefined || value === '') return '—';
+  
+  // إذا كانت القيمة رقمية، يتم تنسيقها ذكياً بناءً على اسم العمود
+  if (typeof value === 'number' || !isNaN(Number(String(value).replace(/,/g, '')))) {
+    const num = parseNum(value);
+    const lowerKey = keyName.toLowerCase();
+    
+    if (lowerKey.includes('mix') || lowerKey.includes('%') || lowerKey.includes('نسبة') || (num > 0 && num <= 1 && (lowerKey.includes('label') || lowerKey.includes('brand')))) {
+      const pct = num > 1 ? num : num * 100;
+      return `${pct.toFixed(1)}٪`;
+    }
+    
+    if (lowerKey.includes('sale') || lowerKey.includes('net') || lowerKey.includes('مبيعات') || lowerKey.includes('قيمة') || lowerKey.includes('total') || lowerKey.includes('price') || lowerKey.includes('online')) {
+      if (Math.abs(num) >= 1_000_000) return `${(num / 1_000_000).toFixed(2)} م ر.س`;
+      if (Math.abs(num) >= 1_000) return `${(num / 1_000).toFixed(1)} ك ر.س`;
+      return `${Math.round(num)} ر.س`;
+    }
+    
+    return new Intl.NumberFormat('ar-SA', { maximumFractionDigits: 2 }).format(num);
+  }
+  
+  return String(value);
 };
 
 const formatCurrencyFull = (value: number): string => {
@@ -64,19 +78,6 @@ const formatCurrencyFull = (value: number): string => {
   }).format(value);
 };
 
-const formatPercent = (value: number): string => {
-  if (!value && value !== 0) return '٠٪';
-  const pct = value > 1 ? value : value * 100;
-  return `${pct.toFixed(1)}٪`;
-};
-
-const formatNumber = (value: number): string => {
-  if (!value && value !== 0) return '٠';
-  return new Intl.NumberFormat('ar-SA', { maximumFractionDigits: 0 }).format(
-    value
-  );
-};
-
 interface PerfLevel {
   label: string;
   color: string;
@@ -86,8 +87,8 @@ interface PerfLevel {
   gradient: string;
 }
 
-const getPerformance = (sales: number, avg: number): PerfLevel => {
-  const ratio = avg > 0 ? sales / avg : 0;
+const getPerformance = (value: number, avg: number): PerfLevel => {
+  const ratio = avg > 0 ? value / avg : 0;
   const width = Math.min(100, (ratio / 1.5) * 100);
   if (ratio >= 1.3)
     return {
@@ -153,7 +154,7 @@ function StatBadge({
         {value}
       </span>
       <span
-        className="text-[11px] font-bold leading-tight text-center font-mono tracking-wider"
+        className="text-[11px] font-bold leading-tight text-center font-mono tracking-wider truncate w-full px-1"
         style={{ color: 'rgba(255,255,255,0.4)' }}
       >
         {label}
@@ -164,15 +165,27 @@ function StatBadge({
 
 function PharmacistCard({
   record,
-  avgSales,
+  avgValue,
   index,
+  headers,
 }: {
-  record: PharmacistRecord;
-  avgSales: number;
+  record: DynamicRecord;
+  avgValue: number;
   index: number;
+  headers: string[];
 }) {
   const [expanded, setExpanded] = useState(false);
-  const perf = getPerformance(record.NET_SALES, avgSales);
+  
+  const branchKey = record._BRANCH_KEY;
+  const nameKey = record._USER_NAME_KEY;
+  const mainValueKey = record._MAIN_VALUE_KEY;
+
+  const currentMainVal = parseNum(record[mainValueKey]);
+  const perf = getPerformance(currentMainVal, avgValue);
+
+  // استخراج أول 3 أعمدة رقمية تظهر بعد حقول التعريف لعرضها كشارات كروت رئيسية متغيرة تماماً حسب الإكسيل
+  const excludedKeys = [branchKey, nameKey, mainValueKey, '_BRANCH_KEY', '_USER_NAME_KEY', '_MAIN_VALUE_KEY'];
+  const badgeKeys = headers.filter(h => !excludedKeys.includes(h)).slice(0, 3);
 
   return (
     <motion.article
@@ -197,7 +210,7 @@ function PharmacistCard({
       <div className={`h-[4px] w-full bg-gradient-to-r ${perf.gradient}`} style={{ backgroundColor: perf.color }} />
 
       <div className="p-5 md:p-6">
-        {/* ── Row 1: avatar + name + sales ── */}
+        {/* ── Row 1: avatar + dynamic name + dynamic primary value ── */}
         <div className="flex items-center justify-between gap-4 mb-4">
           <div className="flex items-center gap-3.5 min-w-0">
             {/* Avatar */}
@@ -209,24 +222,24 @@ function PharmacistCard({
                 border: `1px solid ${perf.ring}`,
               }}
             >
-              {record.USER_NAME.charAt(0)}
+              {record[nameKey] ? String(record[nameKey]).charAt(0) : '?'}
             </div>
 
-            {/* Name + branch */}
+            {/* Name + branch derived from first row */}
             <div className="min-w-0">
               <h3 className="font-extrabold text-base md:text-lg leading-snug text-white tracking-wide truncate">
-                {record.USER_NAME}
+                {String(record[nameKey] || 'غير معروف')}
               </h3>
               <div className="flex items-center gap-2.5 mt-1 flex-wrap">
                 <span
-                  className="flex items-center gap-1.5 text-xs font-medium"
+                  className="px-2 py-0.5 rounded-lg flex items-center gap-1.5 text-xs font-medium"
                   style={{ color: 'rgba(255,255,255,0.45)' }}
                 >
-                  <Building2 size={12} className="text-emerald-400/80" />
-                  {record.BRANCH}
+                  <Building2 size={12} className="text-emerald-400/80 shrink-0" />
+                  <span className="truncate max-w-[120px]">{String(record[branchKey] || 'الكل')}</span>
                 </span>
                 <span
-                  className="px-2.5 py-0.5 rounded-xl text-[11px] font-bold tracking-wide"
+                  className="px-2.5 py-0.5 rounded-xl text-[11px] font-bold tracking-wide shrink-0"
                   style={{ background: perf.bg, color: perf.color, border: `1px solid ${perf.ring}` }}
                 >
                   {perf.label}
@@ -235,33 +248,34 @@ function PharmacistCard({
             </div>
           </div>
 
-          {/* Net Sales */}
-          <div className="text-left shrink-0 bg-white/[0.02] border border-white/[0.05] rounded-2xl px-3.5 py-2">
+          {/* Primary Numeric Display Key (تتغير مسمياتها وقيمها حسب الإكسيل) */}
+          <div className="text-left shrink-0 bg-white/[0.02] border border-white/[0.05] rounded-2xl px-3.5 py-2 max-w-[150px]">
             <p
-              className="text-lg md:text-xl font-black leading-none tracking-tight"
+              className="text-lg md:text-xl font-black leading-none tracking-tight text-emerald-400 truncate"
               style={{ color: '#10b981' }}
             >
-              {formatCurrency(record.NET_SALES)}
+              {formatDynamicValue(record[mainValueKey], mainValueKey)}
             </p>
             <p
-              className="text-[10px] font-bold mt-1 text-center uppercase font-mono tracking-wider"
+              className="text-[9px] font-bold mt-1 text-center uppercase font-mono tracking-wider truncate"
               style={{ color: 'rgba(255,255,255,0.3)' }}
+              title={mainValueKey}
             >
-              NET SALES
+              {mainValueKey}
             </p>
           </div>
         </div>
 
-        {/* ── Progress Bar ── */}
+        {/* ── Dynamic Progress Bar ── */}
         <div className="mb-4 bg-white/[0.01] p-2.5 rounded-xl border border-white/[0.03]">
           <div
             className="flex justify-between text-xs font-bold mb-1.5"
             style={{ color: 'rgba(255,255,255,0.4)' }}
           >
-            <span>الأداء مقارنة بالمتوسط العام</span>
+            <span>الكفاءة مقارنة بالمتوسط العام</span>
             <span style={{ color: perf.color }} className="font-black">
-              {avgSales > 0
-                ? `${((record.NET_SALES / avgSales) * 100).toFixed(0)}٪`
+              {avgValue > 0
+                ? `${((currentMainVal / avgValue) * 100).toFixed(0)}٪`
                 : '—'}
             </span>
           </div>
@@ -285,27 +299,23 @@ function PharmacistCard({
           </div>
         </div>
 
-        {/* ── Stats Row 1 ── */}
+        {/* ── Dynamic Badges Row (مستمدة من الصف الأول وتتغير كلياً حسب المرفوع) ── */}
         <div className="flex gap-2.5 mb-2.5">
-          <StatBadge
-            icon={<ShoppingCart size={15} />}
-            label="BASKET SIZE"
-            value={formatCurrency(record.BASKET_SIZE)}
-            accent
-          />
-          <StatBadge
-            icon={<Package size={15} />}
-            label="PL_Mix"
-            value={formatPercent(record.PL_MIX)}
-          />
-          <StatBadge
-            icon={<Star size={15} />}
-            label="PRIVATE LABEL"
-            value={formatPercent(record.PRIVATE_LABEL)}
-          />
+          {badgeKeys.map((key, i) => (
+            <StatBadge
+              key={key}
+              icon={i === 0 ? <ShoppingCart size={15} /> : i === 1 ? <Package size={15} /> : <Star size={15} />}
+              label={key}
+              value={formatDynamicValue(record[key], key)}
+              accent={i === 0}
+            />
+          ))}
+          {badgeKeys.length === 0 && (
+            <div className="text-center w-full text-xs text-white/20 py-2">يتم سحب وتوليد المؤشرات من ملفك مباشرة</div>
+          )}
         </div>
 
-        {/* ── Expanded Details Grid ── */}
+        {/* ── Expanded All Fields Grid ── */}
         <AnimatePresence initial={false}>
           {expanded && (
             <motion.div
@@ -317,40 +327,29 @@ function PharmacistCard({
               className="overflow-hidden"
             >
               <div className="grid grid-cols-2 gap-2.5 pt-2.5 mt-2.5 border-t border-white/[0.06]">
-                {[
-                  { label: 'CC', value: formatNumber(record.CC) },
-                  {
-                    label: 'BASKET VOLUME',
-                    value: formatNumber(record.BASKET_VOLUME),
-                  },
-                  {
-                    label: 'PROMOTED MIXED SALES',
-                    value: formatCurrencyFull(record.PROMOTED_MIXED_SALES),
-                  },
-                  { label: 'NE MIX', value: formatPercent(record.NE_MIX) },
-                  {
-                    label: 'ONLINE',
-                    value: formatCurrencyFull(record.ONLINE),
-                  },
-                  { label: 'USER ID', value: record.USER_ID },
-                ].map((d) => (
-                  <div
-                    key={d.label}
-                    className="rounded-2xl p-3.5 transition-all duration-300 hover:bg-white/[0.04]"
-                    style={{
-                      background: 'rgba(255,255,255,0.02)',
-                      border: '1px solid rgba(255,255,255,0.05)',
-                    }}
-                  >
-                    <p
-                      className="text-[11px] font-bold mb-1 font-mono tracking-wide"
-                      style={{ color: 'rgba(255,255,255,0.4)' }}
+                {/* طباعة ونقل جميع قيم الصف الأول بلا استثناء كما هي متغيرة */}
+                {headers
+                  .filter(h => !['_BRANCH_KEY', '_USER_NAME_KEY', '_MAIN_VALUE_KEY'].includes(h))
+                  .map((h) => (
+                    <div
+                      key={h}
+                      className="rounded-2xl p-3.5 transition-all duration-300 hover:bg-white/[0.04]"
+                      style={{
+                        background: 'rgba(255,255,255,0.02)',
+                        border: '1px solid rgba(255,255,255,0.05)',
+                      }}
                     >
-                      {d.label}
-                    </p>
-                    <p className="text-sm font-black text-white tracking-wide">{d.value}</p>
-                  </div>
-                ))}
+                      <p
+                        className="text-[11px] font-bold mb-1 font-mono tracking-wide text-white/40 truncate w-full"
+                        title={h}
+                      >
+                        {h}
+                      </p>
+                      <p className="text-sm font-black text-white tracking-wide truncate">
+                        {formatDynamicValue(record[h], h)}
+                      </p>
+                    </div>
+                  ))}
               </div>
             </motion.div>
           )}
@@ -376,33 +375,53 @@ function PharmacistCard({
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function PharmacistTracker() {
-  const [data, setData] = useState<PharmacistRecord[]>([]);
+  const [data, setData] = useState<DynamicRecord[]>([]);
+  const [headers, setHeaders] = useState<string[]>([]); // لحفظ أسماء حقول الصف الأول المستخرجة كلياً
   const [search, setSearch] = useState('');
   const [selectedBranch, setSelectedBranch] = useState('ALL');
   const [branches, setBranches] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [sortKey, setSortKey] = useState<SortKey>('NET_SALES');
+  const [sortKey, setSortKey] = useState<SortKey>('');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [showSort, setShowSort] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+  
+  const [branchHeaderKey, setBranchHeaderKey] = useState('');
+  const [nameHeaderKey, setNameHeaderKey] = useState('');
+  const [valueHeaderKey, setValueHeaderKey] = useState('');
+  
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // استخراج قائمة الصيدليات الفريدة عند تحديث البيانات لتغذية القائمة المنسدلة
+  // استخراج قائمة الاختيارات الديناميكية للفروع وتحديث مفاتيح الصف الأول الفعلي المرفوع
   useEffect(() => {
     if (data.length > 0) {
-      const uniqueBranches = Array.from(new Set(data.map((r) => r.BRANCH))).filter(Boolean);
+      const bKey = data[0]._BRANCH_KEY;
+      const uniqueBranches = Array.from(new Set(data.map((r) => String(r[bKey] || '')))).filter(Boolean);
       setBranches(uniqueBranches);
+      
+      const allKeys = Object.keys(data[0]);
+      setHeaders(allKeys);
+      
+      setBranchHeaderKey(data[0]._BRANCH_KEY);
+      setNameHeaderKey(data[0]._USER_NAME_KEY);
+      setValueHeaderKey(data[0]._MAIN_VALUE_KEY);
+      
+      if (!sortKey) {
+        setSortKey(data[0]._MAIN_VALUE_KEY);
+      }
     } else {
       setBranches([]);
+      setHeaders([]);
+      setSortKey('');
     }
-  }, [data]);
+  }, [data, sortKey]);
 
-  // ── Mount: load from localStorage & online status ──
+  // ── Mount: load from localStorage & setup online status ──
   useEffect(() => {
     try {
-      const stored = localStorage.getItem('pharmacist_data_v2');
+      const stored = localStorage.getItem('dynamic_pharmacy_dashboard_v4');
       if (stored) setData(JSON.parse(stored));
     } catch {
       /* ignore */
@@ -419,7 +438,7 @@ export default function PharmacistTracker() {
     };
   }, []);
 
-  // ── File Parser ──
+  // ── Dynamic File Parser ──
   const handleFile = useCallback(async (file: File) => {
     setIsLoading(true);
     setError('');
@@ -430,77 +449,66 @@ export default function PharmacistTracker() {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rows: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, {
         defval: '',
+        raw: false, 
       });
 
-      if (!rows.length) throw new Error('الملف فارغ ولا يحتوي على بيانات');
+      if (!rows.length) throw new Error('الملف فارغ ولا يحتوي على أي صفوف أو بيانات');
 
-      const parsed: PharmacistRecord[] = rows
-        .map(
-          (row): PharmacistRecord[] => {
-            // خريطة داخلية لربط المسميات المنظفة تماماً بالقيم الأصلية للسطر الحالي
-            const cleanRowMap: Record<string, unknown> = {};
-            Object.keys(row).forEach((key) => {
-              // إزالة الفراغات والرموز الخاصة تماماً وتحويل الحروف إلى صغيرة لضمان فحص دقيق ومطلق
-              const standardKey = key.toString().replace(/[\s\_\-]/g, '').toLowerCase();
-              cleanRowMap[standardKey] = row[key];
-            });
+      // 1. استخراج أسماء الصف الأول الخام (Headers) من الإكسيل مباشرة ليكون كل شيء متغير
+      const rawHeaders = Object.keys(rows[0]);
 
-            // دالة بحث صارمة تفحص مصفوفة الاحتمالات الممكنة لاسم العمود المنظف
-            const getFieldVal = (aliases: string[]): unknown => {
-              for (const alias of aliases) {
-                const target = alias.replace(/[\s\_\-]/g, '').toLowerCase();
-                if (cleanRowMap[target] !== undefined) {
-                  return cleanRowMap[target];
-                }
-              }
-              return '';
-            };
+      // 2. البحث الذكي المرن عن الحقول التشغيلية مع وضع بدائل آلية تامة لأول مسميات في حال الاختلاف المطلق
+      const findBestKey = (aliases: string[], fallbackIndex: number): string => {
+        const found = rawHeaders.find(h => {
+          const norm = h.toString().replace(/[\s\_\-]/g, '').toLowerCase();
+          return aliases.some(a => norm.includes(a) || a.includes(norm));
+        });
+        return found || rawHeaders[fallbackIndex] || rawHeaders[0];
+      };
 
-            // تحديد قيم الأعمدة بناءً على أدق مصفوفات المطابقة والبدائل المحتملة
-            const branchVal = String(getFieldVal(['branch', 'branchname', 'صيدلية', 'الفرع'])).trim();
-            const userIdVal = String(getFieldVal(['userid', 'id', 'usercode', 'كود الموظف'])).trim();
-            const userNameVal = String(getFieldVal(['username', 'name', 'pharmacistname', 'اسم الموظف'])).trim();
+      const detectedBranchKey = findBestKey(['branch', 'صيدلية', 'الفرع', 'اسم الصيدلية', 'pharmacy', 'branchname'], 0);
+      const detectedNameKey = findBestKey(['name', 'username', 'اسم', 'صيدلي', 'الموظف', 'employee', 'pharmacist'], 1);
+      const detectedValueKey = findBestKey(['netsales', 'sales', 'net', 'المبيعات', 'صافي', 'قيمة', 'total', 'الصافي', 'الحصيلة'], 2);
 
-            const netSalesVal = parseNum(getFieldVal(['netsales', 'sales', 'net', 'المبيعات', 'صافي المبيعات']));
-            const ccVal = parseNum(getFieldVal(['cc', 'customercount', 'العملاء']));
-            const basketVolVal = parseNum(getFieldVal(['basketvolume', 'volume', 'basketvol']));
-            const basketSizeVal = parseNum(getFieldVal(['basketsize', 'size', 'basketsiz']));
-            const plMixVal = parseNum(getFieldVal(['plmix', 'pl', 'privatelabelmix']));
-            const promotedVal = parseNum(getFieldVal(['promotedmixedsales', 'promotedsales', 'promotedmixed', 'promoted']));
-            const neMixVal = parseNum(getFieldVal(['nemix', 'ne', 'nemixpercent']));
-            const privateLabelVal = parseNum(getFieldVal(['privatelabel', 'private', 'brand']));
-            const onlineVal = parseNum(getFieldVal(['online', 'onlinesales', 'اونلاين']));
+      // 3. بناء ونقل مصفوفة السجلات التراكمية متغيرة بالكامل ومطابقة للملف 100%
+      const parsed: DynamicRecord[] = rows.map((row): DynamicRecord => {
+        const recordObj: DynamicRecord = {
+          _BRANCH_KEY: detectedBranchKey,
+          _USER_NAME_KEY: detectedNameKey,
+          _MAIN_VALUE_KEY: detectedValueKey,
+        };
 
-            return [{
-              BRANCH: branchVal,
-              USER_ID: userIdVal,
-              USER_NAME: userNameVal,
-              NET_SALES: netSalesVal,
-              CC: ccVal,
-              BASKET_VOLUME: basketVolVal,
-              BASKET_SIZE: basketSizeVal,
-              PL_MIX: plMixVal,
-              PROMOTED_MIXED_SALES: promotedVal,
-              NE_MIX: neMixVal,
-              PRIVATE_LABEL: privateLabelVal,
-              ONLINE: onlineVal,
-            }];
+        // نقل ونقل كافة القيم من الصف الأول للإكسيل كما هي وبنفس مسمياتها دون تعديل بنية المفتاح
+        rawHeaders.forEach((h) => {
+          const rawVal = row[h];
+          // فحص وحفظ البيانات الرقمية لضمان عمل الفرز الرياضي التلقائي بشكل سليم
+          if (rawVal !== undefined && rawVal !== null && rawVal !== '') {
+            const cleanStr = String(rawVal).replace(/,/g, '').trim();
+            if (cleanStr !== '' && !isNaN(Number(cleanStr)) && h !== detectedBranchKey && h !== detectedNameKey) {
+              recordObj[h] = parseNum(rawVal);
+            } else {
+              recordObj[h] = rawVal;
+            }
+          } else {
+            recordObj[h] = '';
           }
-        )
-        .flat()
-        .filter((r) => r.USER_NAME);
+        });
+
+        return recordObj;
+      }).filter(r => r[detectedNameKey]);
 
       if (!parsed.length)
-        throw new Error('لم يتم العثور على أعمدة الصيادلة المطلوبة داخل الملف');
+        throw new Error('فشل استيراد الصفوف؛ يرجى التحقق من احتواء الملف على صف هيدر ممتلئ');
 
+      setSortKey(detectedValueKey);
       setData(parsed);
       setSelectedBranch('ALL');
-      localStorage.setItem('pharmacist_data_v2', JSON.stringify(parsed));
+      localStorage.setItem('dynamic_pharmacy_dashboard_v4', JSON.stringify(parsed));
     } catch (e) {
       setError(
         e instanceof Error
           ? e.message
-          : 'فشل قراءة الملف. تأكد من مطابقة أسماء الأعمدة في ملف الإكسيل.'
+          : 'فشل قراءة ملف الإكسيل. تأكد أن الصف الأول يحتوي على مسميات الأعمدة بشكل سليم.'
       );
     } finally {
       setIsLoading(false);
@@ -521,37 +529,39 @@ export default function PharmacistTracker() {
     setData([]);
     setSearch('');
     setSelectedBranch('ALL');
-    localStorage.removeItem('pharmacist_data_v2');
+    setSortKey('');
+    localStorage.removeItem('dynamic_pharmacy_dashboard_v4');
   };
 
-  // ── Derived Data ──
-  const avgSales = data.length
-    ? data.reduce((s, r) => s + r.NET_SALES, 0) / data.length
+  // ── Derived Dynamic Calculations ──
+  const totalSales = data.length && valueHeaderKey
+    ? data.reduce((s, r) => s + parseNum(r[valueHeaderKey]), 0)
     : 0;
-  const totalSales = data.reduce((s, r) => s + r.NET_SALES, 0);
+  const avgSales = data.length ? totalSales / data.length : 0;
 
-  // فلترة البحث المزدوجة بناءً على قائمة الصيدليات وحقل نص البحث
+  // فلاتر البحث والفرز التفاعلية المطلقة لكل الحقول المتغيرة
   const filtered = data
     .filter((r) => {
-      // 1. تصفية بناءً على الصيدلية المختارة من القائمة
-      if (selectedBranch !== 'ALL' && r.BRANCH !== selectedBranch) {
+      if (selectedBranch !== 'ALL' && branchHeaderKey && String(r[branchHeaderKey]) !== selectedBranch) {
         return false;
       }
-      // 2. تصفية بناءً على نص البحث (USER_NAME)
       const q = search.toLowerCase().trim();
-      return !q || r.USER_NAME.toLowerCase().includes(q);
+      if (!q) return true;
+      
+      // بحث شامل ومرن في كافة قيم وأعمدة السطر المرفوع من الإكسيل
+      return Object.values(r).some(val => String(val).toLowerCase().includes(q));
     })
     .sort((a, b) => {
-      const diff = a[sortKey] - b[sortKey];
-      return sortDir === 'desc' ? -diff : diff;
+      const activeKey = sortKey || valueHeaderKey;
+      if (!activeKey) return 0;
+      
+      const scoreA = typeof a[activeKey] === 'number' ? a[activeKey] : (parseFloat(String(a[activeKey]).replace(/[^0-9.-]/g, '')) || 0);
+      const scoreB = typeof b[activeKey] === 'number' ? b[activeKey] : (parseFloat(String(b[activeKey]).replace(/[^0-9.-]/g, '')) || 0);
+      return sortDir === 'desc' ? scoreB - scoreA : scoreA - scoreB;
     });
 
-  const sortOptions: { key: SortKey; label: string }[] = [
-    { key: 'NET_SALES', label: 'NET SALES' },
-    { key: 'BASKET_SIZE', label: 'BASKET SIZE' },
-    { key: 'PL_MIX', label: 'PL_Mix' },
-    { key: 'PRIVATE_LABEL', label: 'PRIVATE LABEL' },
-  ];
+  // بناء قائمة خيارات الفرز (Sort Dropdown) ديناميكياً من الصف الأول المستخرج
+  const sortOptions = headers.filter(h => !['_BRANCH_KEY', '_USER_NAME_KEY', '_MAIN_VALUE_KEY', branchHeaderKey, nameHeaderKey].includes(h));
 
   // ───────────────────────────────────────────────────────────────────────────
   return (
@@ -560,7 +570,6 @@ export default function PharmacistTracker() {
       className="min-h-screen text-slate-100 antialiased"
       style={{ backgroundColor: '#05070f', fontFamily: "'Cairo', sans-serif" }}
     >
-      {/* تضمين خط Cairo من خلال وسم Link خارجي لمنع أخطاء الـ Hydration الـ عشوائية */}
       <link rel="preconnect" href="https://fonts.googleapis.com" />
       <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
       <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900;1000&display=swap" rel="stylesheet" />
@@ -576,7 +585,6 @@ export default function PharmacistTracker() {
         }}
       >
         <div className="max-w-3xl mx-auto px-5 pt-5 pb-4">
-          {/* Top Row Header */}
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
               <div
@@ -590,7 +598,7 @@ export default function PharmacistTracker() {
               </div>
               <div>
                 <h1 className="text-base md:text-lg font-black tracking-wide text-white leading-none">
-                  مراقب أداء الصيادلة والفروع
+                  مراقب الأداء الفوري الشامل
                 </h1>
                 <div className="flex items-center gap-1.5 mt-1">
                   {isOnline ? (
@@ -603,8 +611,8 @@ export default function PharmacistTracker() {
                     style={{ color: 'rgba(255,255,255,0.4)' }}
                   >
                     {data.length > 0
-                      ? `قاعدة البيانات: ${data.length} سجل نشط`
-                      : 'في انتظار رفع الملف الرئيسي'}
+                      ? `قاعدة البيانات متغيره: ${data.length} سجل نشط بالكامل`
+                      : 'في انتظار استمداد البيانات من الإكسيل'}
                   </span>
                 </div>
               </div>
@@ -621,7 +629,7 @@ export default function PharmacistTracker() {
                     background: 'rgba(239,68,68,0.08)',
                     border: '1px solid rgba(239,68,68,0.25)',
                   }}
-                  title="تحديث ومسح البيانات"
+                  title="مسح وتحديث لرفع ملف جديد"
                 >
                   <RefreshCw size={16} style={{ color: '#ef4444' }} />
                 </motion.button>
@@ -642,22 +650,21 @@ export default function PharmacistTracker() {
             </div>
           </div>
 
-          {/* Search Bar, Branch Dropdown & Advanced Sort Toggle */}
+          {/* Search Bar & Advanced Sort Toggle */}
           {data.length > 0 && (
             <div className="flex flex-col md:flex-row gap-2.5 mt-2">
-              {/* خانة اختيار اسم الصيدلية */}
               <div className="w-full md:w-1/3">
                 <select
                   value={selectedBranch}
                   onChange={(e) => setSelectedBranch(e.target.value)}
-                  className="w-full py-3.5 px-4 rounded-2xl text-sm outline-none cursor-pointer transition-all duration-200 focus:border-emerald-500/50"
+                  className="w-full py-3.5 px-4 rounded-2xl text-sm outline-none cursor-pointer transition-all duration-200 focus:border-emerald-500/50 truncate"
                   style={{
                     background: 'rgba(255,255,255,0.04)',
                     border: '1px solid rgba(255,255,255,0.07)',
                     color: 'white',
                   }}
                 >
-                  <option value="ALL" style={{ backgroundColor: '#0d111d', color: 'white' }}>اختر الصيدلية (الكل) 🏢</option>
+                  <option value="ALL" style={{ backgroundColor: '#0d111d', color: 'white' }}>فلترة الفرع (الكل) 🏢</option>
                   {branches.map((branch) => (
                     <option key={branch} value={branch} style={{ backgroundColor: '#0d111d', color: 'white' }}>
                       {branch}
@@ -666,7 +673,6 @@ export default function PharmacistTracker() {
                 </select>
               </div>
 
-              {/* حقل البحث باسم الصيدلي */}
               <div className="relative flex-1">
                 <Search
                   size={16}
@@ -677,8 +683,8 @@ export default function PharmacistTracker() {
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="ابحث باسم USER NAME..."
-                  className="w-full py-3.5 pr-11 pl-10 rounded-2xl text-sm placeholder:text-white/20 outline-none transition-all duration-200 focus:border-emerald-500/50"
+                  placeholder="ابحث بأي اسم أو رقم أو قيمة مستخرجة..."
+                  className="w-full py-3.5 pr-11 pl-10 rounded-2xl text-sm placeholder:text-white/20 outline-none transition-all duration-200 focus:border-emerald-500/50 text-right"
                   style={{
                     background: 'rgba(255,255,255,0.04)',
                     border: '1px solid rgba(255,255,255,0.07)',
@@ -719,46 +725,39 @@ export default function PharmacistTracker() {
                       animate={{ opacity: 1, y: 0, scale: 1 }}
                       exit={{ opacity: 0, y: -12, scale: 0.95 }}
                       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-                      className="absolute left-0 top-14 w-52 rounded-2xl overflow-hidden z-50 shadow-2xl"
+                      className="absolute left-0 top-14 w-56 rounded-2xl overflow-hidden z-50 shadow-2xl"
                       style={{
                         background: '#0d111d',
                         border: '1px solid rgba(255,255,255,0.1)',
                         boxShadow: '0 24px 70px rgba(0,0,0,0.7)',
                       }}
                     >
-                      <div className="p-2.5 space-y-1">
+                      <div className="p-2.5 space-y-1 max-h-64 overflow-y-auto">
                         <p
-                          className="text-[10px] font-black px-2.5 pb-2 pt-1 uppercase tracking-wider"
-                          style={{ color: 'rgba(255,255,255,0.35)' }}
+                          className="text-[10px] font-black px-2.5 pb-2 pt-1 uppercase tracking-wider text-white/40 text-right"
                         >
-                          فرز العرض حسب:
+                          فرز العرض حسب الصف الأول:
                         </p>
-                        {sortOptions.map((opt) => (
+                        {sortOptions.map((optName) => (
                           <button
-                            key={opt.key}
+                            key={optName}
                             onClick={() => {
-                              if (sortKey === opt.key)
+                              if (sortKey === optName)
                                 setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
                               else {
-                                setSortKey(opt.key);
+                                setSortKey(optName);
                                 setSortDir('desc');
                               }
                               setShowSort(false);
                             }}
-                            className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition-all duration-150"
+                            className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition-all duration-150 text-right"
                             style={{
-                              background:
-                                sortKey === opt.key
-                                  ? 'rgba(16,185,129,0.15)'
-                                  : 'transparent',
-                              color:
-                                sortKey === opt.key
-                                  ? '#10b981'
-                                  : 'rgba(255,255,255,0.75)',
+                              background: sortKey === optName ? 'rgba(16,185,129,0.15)' : 'transparent',
+                              color: sortKey === optName ? '#10b981' : 'rgba(255,255,255,0.75)',
                             }}
                           >
-                            <span className="font-mono">{opt.label}</span>
-                            {sortKey === opt.key && <ArrowUpDown size={12} className="stroke-[2.5]" />}
+                            <span className="font-mono truncate pl-2">{optName}</span>
+                            {sortKey === optName && <ArrowUpDown size={12} className="stroke-[2.5] shrink-0" />}
                           </button>
                         ))}
                       </div>
@@ -773,34 +772,31 @@ export default function PharmacistTracker() {
 
       {/* ── Main Layout Container ── */}
       <main className="max-w-3xl mx-auto px-5 pt-6 pb-28">
-        {/* ── Empty & Upload Screen ── */}
         {data.length === 0 && (
           <motion.div
             initial={{ opacity: 0, y: 15 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6 }}
           >
-            {/* Main Welcome Hero */}
             <div className="text-center py-12 md:py-16">
               <motion.div
                 animate={{ scale: [1, 1.05, 1], rotate: [0, 2, -2, 0] }}
                 transition={{ repeat: Infinity, duration: 4, ease: 'easeInOut' }}
                 className="w-28 h-28 rounded-[32px] mx-auto mb-6 flex items-center justify-center shadow-2xl"
                 style={{
-                  background:
-                    'linear-gradient(135deg, rgba(16,185,129,0.18), rgba(5,150,105,0.03))',
+                  background: 'linear-gradient(135deg, rgba(16,185,129,0.18), rgba(5,150,105,0.03))',
                   border: '1px solid rgba(16,185,129,0.3)',
                   boxShadow: '0 0 50px rgba(16,185,129,0.15)',
                 }}
               >
                 <BarChart2 size={48} style={{ color: '#10b981' }} />
               </motion.div>
-              <h2 className="text-2xl md:text-3xl font-black mb-3 text-white tracking-wide">لوحة أداء الصيادلة الذكية</h2>
+              <h2 className="text-2xl md:text-3xl font-black mb-3 text-white tracking-wide">لوحة الاستيراد الذكي المطلق</h2>
               <p
                 className="text-sm md:text-base leading-relaxed max-w-md mx-auto"
                 style={{ color: 'rgba(255,255,255,0.45)' }}
               >
-                قم بتحميل ملف تقرير أداء الصيدليات بصيغة Excel لعرض المعلومات الفورية، والبحث بالصيدلي والفرع بدقة متناهية.
+                ارفع أي ملف إكسيل أياً كانت مسميات الأعمدة بالصف الأول؛ سيقوم النظام بقراءتها ونقل واستعراض أرقامها تلقائياً بالكامل.
               </p>
             </div>
 
@@ -817,12 +813,8 @@ export default function PharmacistTracker() {
               onClick={() => fileInputRef.current?.click()}
               className="rounded-[28px] p-10 text-center cursor-pointer mb-6 transition-all duration-300 shadow-xl"
               style={{
-                background: isDragging
-                  ? 'rgba(16,185,129,0.1)'
-                  : 'rgba(255,255,255,0.02)',
-                border: `2px dashed ${
-                  isDragging ? '#10b981' : 'rgba(255,255,255,0.12)'
-                }`,
+                background: isDragging ? 'rgba(16,185,129,0.1)' : 'rgba(255,255,255,0.02)',
+                border: `2px dashed ${isDragging ? '#10b981' : 'rgba(255,255,255,0.12)'}`,
                 boxShadow: isDragging ? '0 0 30px rgba(16,185,129,0.1)' : 'none',
               }}
             >
@@ -830,11 +822,7 @@ export default function PharmacistTracker() {
                 <div className="flex flex-col items-center gap-4 py-6">
                   <motion.div
                     animate={{ rotate: 360 }}
-                    transition={{
-                      repeat: Infinity,
-                      duration: 0.9,
-                      ease: 'linear',
-                    }}
+                    transition={{ repeat: Infinity, duration: 0.9, ease: 'linear' }}
                   >
                     <RefreshCw size={36} style={{ color: '#10b981' }} />
                   </motion.div>
@@ -842,7 +830,7 @@ export default function PharmacistTracker() {
                     className="text-base font-bold tracking-wide animate-pulse"
                     style={{ color: '#10b981' }}
                   >
-                    جاري قراءة وتحليل بيانات ملف الإكسيل...
+                    جاري سحب الهيدر ونقل وتوليد لوحة العرض المتغيرة...
                   </p>
                 </div>
               ) : (
@@ -856,12 +844,12 @@ export default function PharmacistTracker() {
                   >
                     <Upload size={28} style={{ color: '#10b981' }} />
                   </div>
-                  <p className="text-base font-black text-white mb-1.5">اسحب وأفلت مستند الـ Excel هنا</p>
+                  <p className="text-base font-black text-white mb-1.5">اسحب وأفلت مستند الـ Excel المتغير هنا</p>
                   <p
                     className="text-xs font-medium"
                     style={{ color: 'rgba(255,255,255,0.35)' }}
                   >
-                    أو انقر لتصفح وتحميل ملفاتك (يدعم XLS, XLSX, CSV)
+                    يدعم جميع الجداول والأعمدة المتغيرة تلقائياً (XLS, XLSX, CSV)
                   </p>
                 </>
               )}
@@ -887,28 +875,27 @@ export default function PharmacistTracker() {
               )}
             </AnimatePresence>
 
-            {/* Feature Highlights Grid */}
             <div className="grid grid-cols-2 gap-4">
               {[
                 {
                   icon: <Search size={22} />,
-                  title: 'فلترة واختيار الفروع',
-                  desc: 'قائمة منسدلة مخصصة تتيح لك عزل صيدلية معينة واستعراض أرقامها بسهولة.',
+                  title: 'قراءة مطلقة ومتغيرة',
+                  desc: 'تتغير واجهة المستخدم والشارات كلياً لتطابق أسماء الأعمدة في ملفك المرفوع.',
                 },
                 {
                   icon: <Building2 size={22} />,
-                  title: 'مطابقة تامة للمسميات',
-                  desc: 'تظهر الحقول بنفس مصطلحات ومسميات ملف الـ Excel الأصلي الإنجليزية.',
+                  title: 'نقل القيم كما هي',
+                  desc: 'تُعرض الأرقام والنصوص والنسب التراكمية دون تعديل أو فرض حقول مسبقة صلبة.',
                 },
                 {
                   icon: <TrendingUp size={22} />,
-                  title: 'تحليل مقارن للمبيعات',
-                  desc: 'حساب النسبة المئوية لكفاءة مبيعات الموظف قياساً بمتوسط الشبكة العامة.',
+                  title: 'فرز تلقائي لكل عمود',
+                  desc: 'تتولَّد خيارات ترتيب وتصفية القائمة لحظياً لكل عنوان عمود مكتوب بالصف الأول.',
                 },
                 {
                   icon: <Users size={22} />,
-                  title: 'خصوصية تامة للبيانات',
-                  desc: 'تتم المعالجة والعرض محلياً داخل جهازك دون إرسال البيانات لأي خوادم خارجية.',
+                  title: 'حماية وأمان محلي',
+                  desc: 'تتم كافة عمليات المعالجة والحساب داخل متصفح جهازك لخصوصية تامة 100%.',
                 },
               ].map((f, i) => (
                 <motion.div
@@ -940,7 +927,7 @@ export default function PharmacistTracker() {
         {/* ── Dashboard Loaded View ── */}
         {data.length > 0 && (
           <>
-            {/* Top Level Summary Core Stats Cards */}
+            {/* Top Level Summary Dynamic Metrics */}
             <motion.div
               initial={{ opacity: 0, y: 15 }}
               animate={{ opacity: 1, y: 0 }}
@@ -954,16 +941,16 @@ export default function PharmacistTracker() {
                 }}
               >
                 <p
-                  className="text-xs font-bold mb-1.5 font-mono tracking-wide"
-                  style={{ color: 'rgba(255,255,255,0.45)' }}
+                  className="text-xs font-bold mb-1.5 font-mono tracking-wide text-white/40 truncate"
+                  title={`إجمالي: ${valueHeaderKey}`}
                 >
-                  TOTAL SALES
+                  TOTAL ({valueHeaderKey || 'MAIN VALUE'})
                 </p>
                 <p
-                  className="text-xl md:text-2xl font-black tracking-wide"
+                  className="text-xl md:text-2xl font-black tracking-wide text-emerald-400"
                   style={{ color: '#10b981' }}
                 >
-                  {formatCurrencyFull(totalSales)}
+                  {totalSales > 0 ? formatCurrencyFull(totalSales) : '—'}
                 </p>
                 <div className="absolute left-4 bottom-4 opacity-10 group-hover:scale-110 transition-transform duration-300">
                   <TrendingUp size={40} className="text-emerald-400" />
@@ -978,16 +965,16 @@ export default function PharmacistTracker() {
                 }}
               >
                 <p
-                  className="text-xs font-bold mb-1.5 font-mono tracking-wide"
-                  style={{ color: 'rgba(255,255,255,0.45)' }}
+                  className="text-xs font-bold mb-1.5 font-mono tracking-wide text-white/40 truncate"
+                  title={`متوسط: ${valueHeaderKey}`}
                 >
-                  AVERAGE SALES
+                  AVERAGE ({valueHeaderKey || 'MAIN VALUE'})
                 </p>
                 <p
-                  className="text-xl md:text-2xl font-black tracking-wide"
+                  className="text-xl md:text-2xl font-black tracking-wide text-blue-400"
                   style={{ color: '#3b82f6' }}
                 >
-                  {formatCurrencyFull(avgSales)}
+                  {avgSales > 0 ? formatCurrencyFull(avgSales) : '—'}
                 </p>
                 <div className="absolute left-4 bottom-4 opacity-10 group-hover:scale-110 transition-transform duration-300">
                   <BarChart2 size={40} className="text-blue-400" />
@@ -995,31 +982,31 @@ export default function PharmacistTracker() {
               </div>
             </motion.div>
 
-            {/* Results Filter Header Badge */}
             <motion.p
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               className="text-xs font-bold mb-4 text-center bg-white/[0.03] w-max mx-auto px-4 py-1.5 rounded-full border border-white/[0.05]"
               style={{ color: 'rgba(255,255,255,0.4)' }}
             >
-              المعروض حالياً: {filtered.length} سجل من أصل {data.length} سجل متاح
+              المعروض حالياً: {filtered.length} صف نشط من أصل {data.length} صف تم استيراده بالكامل
             </motion.p>
 
-            {/* Cards List Stack */}
+            {/* Dynamic Cards Stack */}
             <div className="space-y-4">
               <AnimatePresence mode="popLayout">
                 {filtered.map((record, i) => (
                   <PharmacistCard
-                    key={record.USER_ID + record.USER_NAME + record.BRANCH}
+                    key={i + String(record[nameHeaderKey] || '')}
                     record={record}
-                    avgSales={avgSales}
+                    avgValue={avgSales}
                     index={i}
+                    headers={headers}
                   />
                 ))}
               </AnimatePresence>
             </div>
 
-            {/* Zero Search Results View */}
+            {/* Zero Results View */}
             {filtered.length === 0 && (
               <motion.div
                 initial={{ opacity: 0 }}
@@ -1031,12 +1018,12 @@ export default function PharmacistTracker() {
                   className="mx-auto mb-4 opacity-20"
                   style={{ color: 'white' }}
                 />
-                <p className="font-extrabold text-base text-white mb-1">لا توجد سجلات مطابقة للبحث</p>
+                <p className="font-extrabold text-base text-white mb-1">لا توجد صفوف مطابقة للبحث</p>
                 <p
                   className="text-xs font-medium"
                   style={{ color: 'rgba(255,255,255,0.35)' }}
                 >
-                  تأكد من كتابة اسم USER NAME بشكل صحيح أو تغيير الصيدلية المختارة.
+                  تأكد من كتابة نص أو رقم صحيح يتطابق مع أعمدة الجدول المرفوع.
                 </p>
               </motion.div>
             )}
@@ -1044,7 +1031,7 @@ export default function PharmacistTracker() {
         )}
       </main>
 
-      {/* Hidden File inputs handler */}
+      {/* Hidden File input element handler */}
       <input
         ref={fileInputRef}
         type="file"
